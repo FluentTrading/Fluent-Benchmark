@@ -1,4 +1,4 @@
-package com.fluent.benchmark.queue;
+package com.fluent.benchmark.queue.jmh;
 
 public class QueueConfiguration{
 

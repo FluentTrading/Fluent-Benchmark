@@ -1,4 +1,4 @@
-package com.fluent.benchmark.queue;
+package com.fluent.benchmark.queue.jmh;
 
 /**
  * https://github.com/real-logic/benchmarks
@@ -14,11 +14,11 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static com.fluent.benchmark.queue.QueueConfiguration.*;
+import static com.fluent.benchmark.queue.jmh.QueueConfiguration.*;
 
 
 @State(Scope.Benchmark)
-public class ArrayBlockingQueueBenchmark
+public class ABQueueBenchmark
 {
     @State(Scope.Benchmark)
     public static class SharedState

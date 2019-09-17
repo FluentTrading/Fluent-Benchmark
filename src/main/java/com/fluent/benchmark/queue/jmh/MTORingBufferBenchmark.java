@@ -1,4 +1,4 @@
-package com.fluent.benchmark.queue;
+package com.fluent.benchmark.queue.jmh;
 
 /**
  * https://github.com/real-logic/benchmarks
@@ -6,32 +6,39 @@ package com.fluent.benchmark.queue;
 
 import org.agrona.hints.ThreadHints;
 import org.openjdk.jmh.annotations.*;
+import org.agrona.*;
 import org.agrona.concurrent.*;
+import org.agrona.concurrent.ringbuffer.*;
 
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Queue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static com.fluent.benchmark.queue.QueueConfiguration.*;
+import static com.fluent.benchmark.queue.jmh.QueueConfiguration.*;
 
 
-public class ManyToOneConcurrentArrayQueueBenchmark
-{
+public class MTORingBufferBenchmark{
+    
+    static final int MESSAGE_COUNT_LIMIT = 16;
+    static final Integer SENTINEL = 0;
+    static final int BUFFER_LENGTH = (64 * 1024) + RingBufferDescriptor.TRAILER_LENGTH;
+
     @State(Scope.Benchmark)
     public static class SharedState
     {
         @Param({ "1", "100" })
         int burstLength;
-        Integer[] values;
+        int[] values;
 
         final AtomicBoolean running = new AtomicBoolean(true);
         final AtomicInteger threadId = new AtomicInteger();
-        final Queue<Integer> sendQueue = new ManyToOneConcurrentArrayQueue<>(SEND_QUEUE_CAPACITY);
+
+        RingBuffer ringBuffer;
 
         @SuppressWarnings("unchecked")
         final Queue<Integer>[] responseQueues = new OneToOneConcurrentArrayQueue[MAX_THREAD_COUNT];
-
         Thread consumerThread;
 
         @Setup
@@ -42,42 +49,15 @@ public class ManyToOneConcurrentArrayQueueBenchmark
                 responseQueues[i] = new OneToOneConcurrentArrayQueue<>(RESPONSE_QUEUE_CAPACITY);
             }
 
-            values = new Integer[burstLength];
+            values = new int[burstLength];
             for (int i = 0; i < burstLength; i++)
             {
                 values[i] = -(burstLength - i);
             }
 
-            consumerThread = new Thread(
-                () ->
-                {
-                    while (true)
-                    {
-                        final Integer value = sendQueue.poll();
-                        if (null == value)
-                        {
-                            if (!running.get())
-                            {
-                                break;
-                            }
+            ringBuffer = new ManyToOneRingBuffer(new UnsafeBuffer(ByteBuffer.allocateDirect(BUFFER_LENGTH)));
 
-                            ThreadHints.onSpinWait();
-                        }
-                        else
-                        {
-                            final int intValue = value;
-                            if (intValue >= 0)
-                            {
-                                final Queue<Integer> responseQueue = responseQueues[value];
-                                while (!responseQueue.offer(value))
-                                {
-                                    ThreadHints.onSpinWait();
-                                }
-                            }
-                        }
-                    }
-                }
-            );
+            consumerThread = new Thread(new Subscriber(ringBuffer, running, responseQueues));
 
             consumerThread.setName("consumer");
             consumerThread.start();
@@ -95,9 +75,10 @@ public class ManyToOneConcurrentArrayQueueBenchmark
     public static class PerThreadState
     {
         int id;
-        Integer[] values;
-        Queue<Integer> sendQueue;
+        int[] values;
+        RingBuffer ringBuffer;
         Queue<Integer> responseQueue;
+        final UnsafeBuffer tempBuffer = new UnsafeBuffer(ByteBuffer.allocateDirect(8));
 
         @Setup
         public void setup(final SharedState sharedState)
@@ -106,8 +87,47 @@ public class ManyToOneConcurrentArrayQueueBenchmark
             values = Arrays.copyOf(sharedState.values, sharedState.values.length);
             values[values.length - 1] = id;
 
-            sendQueue = sharedState.sendQueue;
+            ringBuffer = sharedState.ringBuffer;
             responseQueue = sharedState.responseQueues[id];
+        }
+    }
+
+    public static class Subscriber implements Runnable, MessageHandler
+    {
+        private final RingBuffer ringBuffer;
+        private final AtomicBoolean running;
+        private final Queue<Integer>[] responseQueues;
+
+        Subscriber(final RingBuffer ringBuffer, final AtomicBoolean running, final Queue<Integer>[] responseQueues)
+        {
+            this.ringBuffer = ringBuffer;
+            this.running = running;
+            this.responseQueues = responseQueues;
+        }
+
+        public void run()
+        {
+            while (true)
+            {
+                final int msgCount = ringBuffer.read(this, MESSAGE_COUNT_LIMIT);
+                if (0 == msgCount && !running.get())
+                {
+                    break;
+                }
+            }
+        }
+
+        public void onMessage(final int msgTypeId, final MutableDirectBuffer buffer, final int index, final int length)
+        {
+            final int value = buffer.getInt(index);
+            if (value >= 0)
+            {
+                final Queue<Integer> responseQueue = responseQueues[value];
+                while (!responseQueue.offer(SENTINEL))
+                {
+                    ThreadHints.onSpinWait();
+                }
+            }
         }
     }
 
@@ -137,11 +157,13 @@ public class ManyToOneConcurrentArrayQueueBenchmark
 
     private Integer sendBurst(final PerThreadState state)
     {
-        final Queue<Integer> sendQueue = state.sendQueue;
+        final RingBuffer ringBuffer = state.ringBuffer;
+        final UnsafeBuffer tempBuffer = state.tempBuffer;
 
         for (final Integer value : state.values)
         {
-            while (!sendQueue.offer(value))
+            tempBuffer.putInt(0, value);
+            while (!ringBuffer.write(1, tempBuffer, 0, BitUtil.SIZE_OF_INT))
             {
                 ThreadHints.onSpinWait();
             }
@@ -161,4 +183,5 @@ public class ManyToOneConcurrentArrayQueueBenchmark
 
         return value;
     }
+
 }
